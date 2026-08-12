@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+version: "2"
+run:
+  go: "1.26"
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - dupword
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - goconst
+    - gocritic
+    - godot
+    - goprintffuncname
+    - gosec
+    - govet
+    - iface
+    - ineffassign
+    - intrange
+    - loggercheck
+    - makezero
+    - mirror
+    - misspell
+    - nilerr
+    - nilnesserr
+    - noctx
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - reassign
+    - recvcheck
+    - revive
+    - sloglint
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      settings:
+        hugeParam:
+          sizeThreshold: 128
+    godot:
+      scope: toplevel
+      capital: true
+      period: true
+      exclude:
+        - "SPDX-License-Identifier"
+        - "SPDX-FileCopyrightText"
+        - "\\+groupName="
+    gosec:
+      severity: medium
+      confidence: medium
+      config:
+        global:
+          nosec: true
+    govet:
+      enable-all: true
+      disable:
+        - shadow
+    misspell:
+      locale: US
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+    revive:
+      severity: warning
+      rules:
+        - name: bool-literal-in-expr
+        - name: context-keys-type
+        - name: datarace
+        - name: deep-exit
+        - name: defer
+        - name: early-return
+        - name: error-return
+        - name: errorf
+        - name: get-return
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-value-receiver
+        - name: redundant-build-tag
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unchecked-type-assertion
+          arguments:
+            - acceptIgnoredAssertionResult: true
+        - name: unconditional-recursion
+        - name: unnecessary-stmt
+        - name: unused-receiver
+        - name: use-any
+        - name: use-errors-new
+        - name: useless-break
+  exclusions:
+    generated: lax
+    presets:
+      - std-error-handling
+    paths:
+      - vendor/.*
+      - zz_generated\.deepcopy\.go
+formatters:
+  enable:
+    - gci
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - blank
+        - localmodule
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - vendor/.*
+      - zz_generated\.deepcopy\.go

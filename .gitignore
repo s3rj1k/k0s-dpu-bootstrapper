@@ -1,0 +1,5 @@
+# Build output of the build task.
+/bin/
+
+# Coverage profile written by the cover task.
+cover.out

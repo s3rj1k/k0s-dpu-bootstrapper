@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k0s-dpu-bootstrapper
+  namespace: dpf-operator-system
+  labels:
+    app.kubernetes.io/name: k0s-dpu-bootstrapper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k0s-dpu-bootstrapper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k0s-dpu-bootstrapper
+    spec:
+      serviceAccountName: k0s-dpu-bootstrapper
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrapper
+          image: ghcr.io/s3rj1k/k0s-dpu-bootstrapper:dev
+          args:
+            - --template-namespace=dpf-operator-system
+            - --token-ttl=4h
+            - --token-refresh-before=1h
+            - --leader-elect
+          ports:
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

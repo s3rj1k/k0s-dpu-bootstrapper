@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+version: "3"
+vars:
+  BINARY: bootstrapper
+  OUT_DIR: bin
+  IMAGE: '{{.IMAGE | default "ghcr.io/s3rj1k/k0s-dpu-bootstrapper"}}'
+  TAG: '{{.TAG | default "dev"}}'
+  PLATFORMS: linux/amd64,linux/arm64
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+  tidy:
+    desc: Sync go.mod and go.sum
+    cmds:
+      - go mod tidy
+  fmt:
+    desc: Format the source with the linter formatters
+    cmds:
+      - golangci-lint fmt ./...
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+  lint-fix:
+    desc: Run golangci-lint and apply the fixes it can make
+    cmds:
+      - golangci-lint fmt ./...
+      - golangci-lint run --fix ./...
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test -race ./...
+  cover:
+    desc: Run unit tests and report coverage per package
+    cmds:
+      - go test -race -coverprofile=cover.out ./...
+      - go tool cover -func=cover.out
+  build:
+    desc: Build the controller binary into ./bin
+    cmds:
+      # The version comes from the VCS stamp Go embeds, so nothing is injected here.
+      - CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o {{.OUT_DIR}}/{{.BINARY}} ./cmd/bootstrapper
+  verify:
+    desc: Everything CI runs, meaning lint and tests
+    cmds:
+      - task: lint
+      - task: test
+  image:
+    desc: Build the container image for the local platform
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}} .
+  image-push:
+    desc: Build and push a multi-platform image (needs docker buildx)
+    cmds:
+      - docker buildx build --push --platform {{.PLATFORMS}} -t {{.IMAGE}}:{{.TAG}} .
+  deploy:
+    desc: Apply the RBAC and Deployment manifests to the current kube context
+    cmds:
+      - kubectl apply -f deploy/rbac.yaml
+      - kubectl apply -f deploy/deployment.yaml
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.OUT_DIR}} cover.out

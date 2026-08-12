@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Only ever exclude what git ignores too. Excluding a tracked file reads as a modified work
+# tree inside the builder, which collapses the embedded version.
+
+# Build output of the build task.
+/bin/
+
+# Coverage profile written by the cover task.
+cover.out
