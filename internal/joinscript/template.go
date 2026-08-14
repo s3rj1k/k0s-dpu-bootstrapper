@@ -14,7 +14,9 @@ import (
 	"text/template"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -38,6 +40,9 @@ const (
 	// FlavorAnnotation optionally narrows a template to one DPUFlavor in that cluster.
 	// A template without it serves every flavor in the cluster.
 	FlavorAnnotation = "k0s.mirantis.com/dpu-flavor"
+	// SkipValidationAnnotation set to "true" hands the rendered script to the DPU without
+	// parsing it, the escape hatch when the parser is wrong about a working script.
+	SkipValidationAnnotation = "k0s.mirantis.com/skip-script-validation"
 
 	// ScriptKey holds the script template. Every other key in the ConfigMap is a value
 	// exposed to that template under .Values.
@@ -50,7 +55,18 @@ type Template struct {
 	Name            string
 	Namespace       string
 	ResourceVersion string
+	UID             types.UID
 	Script          string
+	// SkipValidation carries SkipValidationAnnotation through to the caller.
+	SkipValidation bool
+}
+
+// ConfigMapRef identifies the ConfigMap a template was resolved from, which is enough for
+// an Event to be recorded against it.
+func (t *Template) ConfigMapRef() *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: t.Name, Namespace: t.Namespace, UID: t.UID},
+	}
 }
 
 // ValuesFromData returns every ConfigMap key except the script.
@@ -147,8 +163,10 @@ func Resolve(ctx context.Context, c client.Reader, namespace string, target Targ
 		Name:            cm.Name,
 		Namespace:       cm.Namespace,
 		ResourceVersion: cm.ResourceVersion,
+		UID:             cm.UID,
 		Script:          script,
 		Values:          ValuesFromData(cm.Data),
+		SkipValidation:  cm.Annotations[SkipValidationAnnotation] == "true",
 	}, nil
 }
 

@@ -8,6 +8,7 @@ require (
 	k8s.io/apimachinery v0.34.9
 	k8s.io/client-go v0.34.9
 	k8s.io/cluster-bootstrap v0.34.9
+	mvdan.cc/sh/v3 v3.13.1
 	sigs.k8s.io/controller-runtime v0.22.3
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -52,7 +53,7 @@ require (
 	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/term v0.30.0 // indirect
+	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect

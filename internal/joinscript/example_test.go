@@ -91,8 +91,18 @@ func TestExampleStepsRenderInOrder(t *testing.T) {
 	}
 }
 
-// TestExampleRendersValidShell parses the rendered script with bash, which catches a
-// heredoc or a quote that a substitution left unbalanced.
+// TestExamplePassesValidation keeps the shipped example on the right side of the check the
+// controller applies, since a rejected one would never reach a DPU.
+func TestExamplePassesValidation(t *testing.T) {
+	_, got := tests.LoadExample(t)
+
+	if err := joinscript.Validate(got, tests.ExampleFile); err != nil {
+		t.Errorf("the shipped example does not pass validation: %v", err)
+	}
+}
+
+// TestExampleRendersValidShell parses the rendered script with the real bash, which is what
+// runs it and what the Go parser only stands in for.
 func TestExampleRendersValidShell(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is not installed")

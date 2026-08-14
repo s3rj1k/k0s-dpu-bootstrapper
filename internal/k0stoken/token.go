@@ -108,6 +108,25 @@ func Encode(apiServerURL string, caCert []byte, token string) (string, error) {
 	return base64.StdEncoding.EncodeToString(out.Bytes()), nil
 }
 
+// ShellSafe reports whether an encoded token can be substituted into a script without
+// changing how it parses, which is what lets one be checked with a stand in token.
+func ShellSafe(encoded string) bool {
+	if encoded == "" {
+		return false
+	}
+
+	for _, r := range encoded {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '+', r == '/', r == '=':
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
 // Mint creates a worker bootstrap token in the target cluster and returns the encoded
 // join token, which points at the API server the DPU can reach.
 func Mint(ctx context.Context, c client.Client, apiServerURL string, caCert []byte, ttl time.Duration, now time.Time) (*Token, error) {
@@ -127,13 +146,21 @@ func Mint(ctx context.Context, c client.Client, apiServerURL string, caCert []by
 	}
 	expiresAt := now.Add(ttl).UTC().Truncate(time.Second)
 
-	if createErr := c.Create(ctx, BootstrapSecret(id, secretPart, expiresAt)); createErr != nil {
-		return nil, fmt.Errorf("creating bootstrap token secret: %w", createErr)
-	}
-
+	// Encoded before anything is created, or a failure here would strand a live token that
+	// the caller never learns the id of and so can never revoke.
 	encoded, err := Encode(apiServerURL, caCert, id+"."+secretPart)
 	if err != nil {
 		return nil, err
+	}
+
+	// Base64 by construction. Checked because the join script is validated with a stand in
+	// token, so a token carrying anything a shell reads would slip past that check.
+	if !ShellSafe(encoded) {
+		return nil, errors.New("encoded join token is not base64")
+	}
+
+	if createErr := c.Create(ctx, BootstrapSecret(id, secretPart, expiresAt)); createErr != nil {
+		return nil, fmt.Errorf("creating bootstrap token secret: %w", createErr)
 	}
 
 	return &Token{ID: id, Encoded: encoded, ExpiresAt: expiresAt}, nil

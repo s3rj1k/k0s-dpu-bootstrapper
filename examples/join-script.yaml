@@ -14,6 +14,8 @@ metadata:
     # label values are too short for some cluster names.
     k0s.mirantis.com/dpu-cluster-name: dpu-cluster-1
     k0s.mirantis.com/dpu-cluster-namespace: dpf-operator-system
+    # Uncomment to store the rendered script without parsing it as bash first.
+    # k0s.mirantis.com/skip-script-validation: "true"
 data:
   # Exported by the skeleton.
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -108,5 +109,69 @@ func TestMintRejectsBadInput(t *testing.T) {
 func TestDecodeRejectsGarbage(t *testing.T) {
 	if _, err := k0stoken.Decode("not base64 $$"); err == nil {
 		t.Fatal("expected an error, got none")
+	}
+}
+
+func TestShellSafe(t *testing.T) {
+	// The join script is checked with a stand in token, which only holds if a real one
+	// cannot change how the script parses.
+	if !k0stoken.ShellSafe("YWJjZGVm+/012789==") {
+		t.Error("base64 was rejected")
+	}
+
+	for _, encoded := range []string{"", "a'b", "a\"b", "a`b", "a$b", "a b", "a\nb", "a;b", "a\\b", "a|b"} {
+		if k0stoken.ShellSafe(encoded) {
+			t.Errorf("%q was accepted, and a shell reads it", encoded)
+		}
+	}
+}
+
+func TestMintProducesAShellSafeToken(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
+
+	token, err := k0stoken.Mint(t.Context(), c, tests.APIServerURL, []byte(tests.FakeCA), time.Hour, tests.Now)
+	if err != nil {
+		t.Fatalf("k0stoken.Mint: %v", err)
+	}
+	if !k0stoken.ShellSafe(token.Encoded) {
+		t.Errorf("Mint produced a token a shell reads: %q", token.Encoded)
+	}
+}
+
+func TestGenerateHasTheShapeAKubeletIsAcceptedWith(t *testing.T) {
+	// A bootstrap token authenticates only as a 6 character id and a 16 character secret,
+	// and the Secret naming it in the cluster is derived from the id.
+	id, secret, err := k0stoken.Generate()
+	if err != nil {
+		t.Fatalf("k0stoken.Generate: %v", err)
+	}
+	if len(id) != 6 {
+		t.Errorf("id = %q, want six characters", id)
+	}
+	if len(secret) != 16 {
+		t.Errorf("secret = %q, want sixteen characters", secret)
+	}
+}
+
+func TestRevoke(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
+
+	token, err := k0stoken.Mint(t.Context(), c, tests.APIServerURL, []byte(tests.FakeCA), time.Hour, tests.Now)
+	if err != nil {
+		t.Fatalf("k0stoken.Mint: %v", err)
+	}
+	if err := k0stoken.Revoke(t.Context(), c, token.ID); err != nil {
+		t.Fatalf("k0stoken.Revoke: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: "kube-system", Name: "bootstrap-token-" + token.ID}
+	if err := c.Get(t.Context(), key, secret); !apierrors.IsNotFound(err) {
+		t.Errorf("the token secret is still there, err = %v", err)
+	}
+
+	// Revocation runs on paths that may already have run, so a token that is gone is done.
+	if err := k0stoken.Revoke(t.Context(), c, token.ID); err != nil {
+		t.Errorf("revoking an absent token = %v, want no error", err)
 	}
 }

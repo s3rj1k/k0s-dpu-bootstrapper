@@ -13,15 +13,16 @@ import (
 )
 
 const (
-	testExtraArgs = "--labels dpu=true"
-	testCRISocket = "remote:unix:///run/containerd/containerd.sock"
-	testScript    = "echo hi"
+	testExtraArgs    = "--labels dpu=true"
+	testCRISocket    = "remote:unix:///run/containerd/containerd.sock"
+	testScript       = "echo hi"
+	testTemplateName = "k0s-join"
 )
 
 var testTarget = joinscript.Target{Cluster: tests.ClusterOne, Flavor: tests.Flavor}
 
 func TestResolve(t *testing.T) {
-	c := tests.Client(t, tests.JoinScriptConfigMap("k0s-join", tests.ClusterOne, map[string]string{
+	c := tests.Client(t, tests.JoinScriptConfigMap(testTemplateName, tests.ClusterOne, map[string]string{
 		joinscript.ScriptKey: "echo {{ .DPUName }}",
 		"k0sVersion":         "v1.34.9",
 		"extraArgs":          "--labels dpu=true",
@@ -46,13 +47,19 @@ func TestResolve(t *testing.T) {
 	if !strings.HasPrefix(tmpl.Ref(), "k0s-join@") {
 		t.Errorf("Ref() = %q, want it to start with k0s-join@", tmpl.Ref())
 	}
+
+	// Carried so that an Event recorded against the ConfigMap names the object that exists,
+	// rather than any later ConfigMap that reuses the name.
+	if tmpl.UID != tests.TemplateUID(testTemplateName) {
+		t.Errorf("UID = %q, want the one the ConfigMap carries", tmpl.UID)
+	}
 }
 
 func TestResolveNoMatchIsNotAnError(t *testing.T) {
 	// A DPU in a cluster this controller does not manage must be left alone, with DPF's
 	// own kubeadm join Secret untouched.
 	other := dpf.ClusterRef{Name: "someone-elses", Namespace: tests.Namespace}
-	c := tests.Client(t, tests.JoinScriptConfigMap("k0s-join", other, map[string]string{joinscript.ScriptKey: testScript}))
+	c := tests.Client(t, tests.JoinScriptConfigMap(testTemplateName, other, map[string]string{joinscript.ScriptKey: testScript}))
 
 	tmpl, err := joinscript.Resolve(t.Context(), c, tests.Namespace, testTarget)
 	if err != nil {
@@ -79,7 +86,7 @@ func TestResolveAmbiguousIsAnError(t *testing.T) {
 }
 
 func TestResolveMissingScriptKey(t *testing.T) {
-	c := tests.Client(t, tests.JoinScriptConfigMap("k0s-join", tests.ClusterOne, map[string]string{"wrong-key": testScript}))
+	c := tests.Client(t, tests.JoinScriptConfigMap(testTemplateName, tests.ClusterOne, map[string]string{"wrong-key": testScript}))
 
 	if _, err := joinscript.Resolve(t.Context(), c, tests.Namespace, testTarget); err == nil {
 		t.Fatal("expected an error, got none")
@@ -88,7 +95,7 @@ func TestResolveMissingScriptKey(t *testing.T) {
 
 func TestRender(t *testing.T) {
 	tmpl := &joinscript.Template{
-		Name: "k0s-join",
+		Name: testTemplateName,
 		Script: "k0s install worker --cri-socket {{ .Values.criSocket }} " +
 			"{{ .Values.extraArgs }} # {{ .NodeName }} {{ .JoinToken }}",
 		Values: map[string]string{"extraArgs": testExtraArgs, "criSocket": testCRISocket},
@@ -112,7 +119,7 @@ func TestRender(t *testing.T) {
 func TestRenderMissingValueIsAnError(t *testing.T) {
 	// The rendered script runs as root on the DPU, so a typo must fail loudly instead of
 	// substituting an empty string.
-	tmpl := &joinscript.Template{Name: "k0s-join", Script: "curl -o k0s {{ .Values.k0sURL }}", Values: map[string]string{}}
+	tmpl := &joinscript.Template{Name: testTemplateName, Script: "curl -o k0s {{ .Values.k0sURL }}", Values: map[string]string{}}
 
 	if _, err := joinscript.Render(tmpl, &joinscript.Data{Values: tmpl.Values}); err == nil {
 		t.Fatal("expected an error, got none")
@@ -189,6 +196,52 @@ func TestResolveAmbiguousFlavorScopeIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exactly one is required") {
 		t.Errorf("error = %q", err)
+	}
+}
+
+func TestResolveReadsSkipValidation(t *testing.T) {
+	plain := tests.JoinScript(testTemplateName, tests.ClusterOne, testScript)
+
+	tmpl, err := joinscript.Resolve(t.Context(), tests.Client(t, plain), tests.Namespace, testTarget)
+	if err != nil {
+		t.Fatalf("joinscript.Resolve: %v", err)
+	}
+	if tmpl.SkipValidation {
+		t.Error("validation is off by default, it has to be asked for")
+	}
+
+	opted := tests.WithoutScriptValidation(tests.JoinScript(testTemplateName, tests.ClusterOne, testScript))
+
+	tmpl, err = joinscript.Resolve(t.Context(), tests.Client(t, opted), tests.Namespace, testTarget)
+	if err != nil {
+		t.Fatalf("joinscript.Resolve: %v", err)
+	}
+	if !tmpl.SkipValidation {
+		t.Errorf("the %s annotation was not read", joinscript.SkipValidationAnnotation)
+	}
+
+	// Only the exact value turns the check off. Anything else, including someone writing
+	// "false" to record that they are not skipping, has to leave it on.
+	for _, value := range []string{"false", "True", "1", ""} {
+		cm := tests.JoinScript(testTemplateName, tests.ClusterOne, testScript)
+		cm.Annotations[joinscript.SkipValidationAnnotation] = value
+
+		tmpl, err := joinscript.Resolve(t.Context(), tests.Client(t, cm), tests.Namespace, testTarget)
+		if err != nil {
+			t.Fatalf("joinscript.Resolve: %v", err)
+		}
+		if tmpl.SkipValidation {
+			t.Errorf("the annotation set to %q turned validation off", value)
+		}
+	}
+}
+
+func TestConfigMapRef(t *testing.T) {
+	// An Event is recorded against this, so it has to name the ConfigMap it came from.
+	got := (&joinscript.Template{Name: testTemplateName, Namespace: tests.Namespace, UID: "cm-uid"}).ConfigMapRef()
+
+	if got.Name != testTemplateName || got.Namespace != tests.Namespace || got.UID != "cm-uid" {
+		t.Errorf("ConfigMapRef() = %+v", got.ObjectMeta)
 	}
 }
 

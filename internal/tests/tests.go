@@ -120,12 +120,19 @@ func DPUCluster(ref dpf.ClusterRef) *unstructured.Unstructured {
 	return u
 }
 
+// TemplateUID is the UID a template ConfigMap fixture carries, so that the Event recorded
+// against one has the identity a real cluster would give it.
+func TemplateUID(name string) types.UID {
+	return types.UID(name + "-cm-uid")
+}
+
 // JoinScriptConfigMap builds a labeled template ConfigMap scoped to a cluster.
 func JoinScriptConfigMap(name string, cluster dpf.ClusterRef, data map[string]string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: Namespace,
+			UID:       TemplateUID(name),
 			Labels:    map[string]string{joinscript.TemplateLabel: joinscript.TemplateLabelValue},
 			Annotations: map[string]string{
 				joinscript.ClusterNameAnnotation:      cluster.Name,
@@ -144,6 +151,13 @@ func JoinScript(name string, cluster dpf.ClusterRef, script string) *corev1.Conf
 // ScopedToFlavor narrows a template ConfigMap to one DPUFlavor.
 func ScopedToFlavor(cm *corev1.ConfigMap, flavor string) *corev1.ConfigMap {
 	cm.Annotations[joinscript.FlavorAnnotation] = flavor
+
+	return cm
+}
+
+// WithoutScriptValidation opts a template ConfigMap out of the shell parser.
+func WithoutScriptValidation(cm *corev1.ConfigMap) *corev1.ConfigMap {
+	cm.Annotations[joinscript.SkipValidationAnnotation] = "true"
 
 	return cm
 }

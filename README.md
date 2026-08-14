@@ -18,8 +18,10 @@ fork of DPF.
 
 1. A `DPU` object appears.
 2. The controller finds a join script template for that DPU's `DPUCluster`.
-3. It mints a k0s worker bootstrap token **in that cluster**.
-4. It renders the script and writes it to `<dpu-name>-kubeadm-join` in the DPU's namespace.
+3. It renders the script and checks that it parses as bash, so a broken template is caught
+   before anything is created for it.
+4. It mints a k0s worker bootstrap token **in that cluster** and writes the script to
+   `<dpu-name>-kubeadm-join` in the DPU's namespace.
 5. DPF's agent runs it, and the DPU joins as a node named after the `DPU` object.
 
 DPUs whose cluster has no template are ignored. Many `DPUCluster`s work side by side, each
@@ -140,13 +142,16 @@ Confirm it is this controller's, not DPF's.
 ```sh
 kubectl get secret <dpu>-kubeadm-join -n dpf-operator-system \
   -o jsonpath='{.metadata.annotations}'
-# k0s.mirantis.com/managed-by, /join-script-template, /token-expires-at, /token-id
+# k0s.mirantis.com/managed-by, /join-script-template, /token-expires-at, /token-id,
+# /input-hash, /script-hash. The template one is a record, not a freshness check
 ```
 
-Failures are Warning Events on the `DPU`, not on the Secret.
+Failures are Warning Events on the `DPU`, not on the Secret. A script that does not parse is
+reported on the template ConfigMap as well, since that is the object to edit.
 
 ```sh
 kubectl describe dpu <dpu> -n dpf-operator-system
+kubectl describe cm <template> -n dpf-operator-system
 ```
 
 Release the hold, then watch it through to `Ready`.
@@ -171,6 +176,7 @@ controller emits a Warning Event and writes nothing.
 | label | `k0s.mirantis.com/dpu-join-script: "true"` |
 | annotations | `k0s.mirantis.com/dpu-cluster-name`, `k0s.mirantis.com/dpu-cluster-namespace` |
 | | `k0s.mirantis.com/dpu-flavor`, optional, wins over a cluster-wide template |
+| | `k0s.mirantis.com/skip-script-validation`, optional, `"true"` skips the bash parse |
 | `join.sh` | the script template |
 | any other key | a value, exposed as `.Values.<key>` |
 
@@ -186,6 +192,75 @@ Three rules:
   script as literal text, and only the first line of a multi-line value is indented.
 
 Branch on `.DPUName` for a one DPU exception. Use a flavor scoped template for a group.
+
+### Validation
+
+The rendered script is parsed as bash **before a token is minted for it**. A script that does
+not parse is not handed to the DPU, and no credential is created for it however many times
+the reconcile is retried. A `JoinScriptInvalid` Warning Event is recorded on both the `DPU`
+and the template ConfigMap. Any Secret already there is left alone, so a DPU that has not
+joined yet keeps whatever it was last given until that token expires.
+
+The check runs against the script rendered with a stand in token, since the real one does
+not exist yet. Join tokens are base64, which carries nothing a shell reads, so the stand in
+cannot make a script pass that the real token would break. `k0stoken.Mint` refuses to return
+a token that is not base64 rather than leave that as an assumption.
+
+A template that does not render is reported the same way, as `JoinScriptRenderFailed`, and
+also on both objects. Referencing a value that is not set is the usual cause.
+
+The Event reads `<template>@<resourceVersion>:<line>:<column>: <what went wrong>`, and names
+the opt out below. Those line numbers count the **rendered** script, after values were
+substituted, not `join.sh` in the ConfigMap. An oversized script is reported by size instead,
+with no position. Fix the template and the next reconcile picks it up, template ConfigMaps
+are watched.
+
+### When a Secret is rewritten
+
+Two annotations decide, and both must match or the Secret is rewritten.
+
+| | |
+|---|---|
+| `k0s.mirantis.com/input-hash` | the script as rendered with a fixed stand in token |
+| `k0s.mirantis.com/script-hash` | the script that was actually stored |
+
+The first notices a change to what the script would say, the second notices a change to what
+the Secret holds. A Secret written by a build older than these annotations has neither, so it
+is rewritten on sight. A token inside its refresh window is rewritten regardless.
+
+The template's `resourceVersion` no longer decides anything, so adding a label to a template
+does not re-mint a token for every DPU that uses it.
+
+**What `input-hash` does and does not cover.** It is a hash of rendered text, so it covers an
+input only where the template writes that input into the script. The API server address is
+worth knowing about, because it comes from the `DPUCluster` kubeconfig rather than the
+template, so a control plane that moves changes nothing a template revision would show. Keep
+`{{ .APIServerURL }}` somewhere in your template if you want that tracked. What travels
+inside the token and never appears in the script, the address again and the cluster CA, is
+not tracked and is picked up only when the token is next refreshed.
+
+The `DPUCluster` kubeconfig Secret is read on every reconcile to do this, which is the cost.
+
+**Forcing a rewrite.** Neither hash can be recomputed by hand, since one is of a script you
+never see and the other is of bytes you would have to hash exactly. Delete the annotation
+instead, and the next reconcile rebuilds the Secret.
+
+```sh
+kubectl annotate secret <dpu>-kubeadm-join -n dpf-operator-system k0s.mirantis.com/script-hash-
+```
+
+The script is **stored exactly as rendered**. Only the parse result is used, never the
+parser's own idea of how the script should look, because printing a parsed script back out
+rewrites backticks into `$()` and respaces array subscripts, either of which changes what
+runs as root.
+
+The parse rejects a rendered script over 64 KiB, well above a real one and well below the
+nesting depth that would overflow the parser's stack.
+
+Set `k0s.mirantis.com/skip-script-validation: "true"` to store the script without parsing
+it. The parser is stricter than bash in a few corners, so this is the way out when it
+rejects something a DPU would have run. It turns off the size limit with everything else,
+and nothing records that a cluster is running unchecked scripts.
 
 The DPU agent behaves in four ways a script must accommodate. Ignoring any one stalls
 provisioning.
@@ -219,6 +294,7 @@ The controller-runtime `--zap-*` logging flags are also registered.
 |---|---|
 | DPU stuck at `Initialize Interface`, `DPUOOBBridgeNotConfigured` | no `br-dpu` on the host, step 1 |
 | DPU stuck at `DPU Cluster Config`, `NodeNotFound` | the join script ran but no node registered. Read the rendered Secret |
+| `JoinScriptInvalid` Event, and no Secret, DPF's own kubeadm one, or the last script this controller wrote | the rendered script is not valid bash. The Event names the line and column of the rendered script, or its size |
 | kubelet never starts on the DPU | `k0sProfile` names a worker profile that does not exist |
 | TLS `certificate is not yet valid` | the DPU clock is behind, usually no DNS so `ntpsec` cannot reach its pool |
 | `<node>-dms` Pod crash loops on a DPU node | NFD labelled the DPU `dpu-enabled`. Apply the worker affinity |
@@ -247,7 +323,8 @@ The image is a static binary on `gcr.io/distroless/static-debian12:nonroot`, uid
 
 **No CRDs.** Configuration is a labelled ConfigMap, so installing this adds nothing to the
 cluster's API surface. There is no status subresource, so failures are Warning Events on the
-DPU and the annotations on the Secret record the last **successful** render.
+DPU, and on the template ConfigMap when that is what is at fault. The annotations on the
+Secret record the last **successful** render.
 
 **Overwriting DPF's Secret is safe.** DPF writes it once and never updates it, in zero-trust
 mode the agent may read only a Secret of that name, and its owner reference deletes it with
@@ -257,12 +334,22 @@ the DPU.
 window that includes BFB flashing. Nothing reads it afterwards, because k0s auto-approves
 kubelet certificate rotation.
 
+**Tokens are taken back, best effort.** A token lives in the DPU cluster, where nothing owns
+it and no garbage collector reaches it, so it would otherwise sit there until `--token-ttl`
+runs out. One is revoked when a rewrite replaces it, and when a DPU is deleted. Both are best
+effort. A revoke that fails is logged and the token then ages out as before, and a DPU that
+vanishes without the controller seeing it takes its token with it unrevoked.
+
 **No DPF import.** Its objects are read unstructured and projected in `internal/dpf`, making
 DPF a runtime rather than a compile-time dependency.
 
 **No k0s import.** `internal/k0stoken` is derived from k0s `pkg/token` (Apache-2.0, headers
 retained), because importing it pulls in `k8s.io/kubernetes` and ~31 replace directives.
 Diff it against upstream when upgrading k0s.
+
+**The only dependency this adds.** `mvdan.cc/sh/v3/syntax`, the parser behind `shfmt`, which
+pulls in no module but its own. It did move `golang.org/x/term`, which is linked into the
+binary, eleven minor versions forward. Only the parser is used, not the printer.
 
 **Known risk.** This controller owns the contents of a Secret DPF writes for its own use, a
 real but undeclared contract. Pin the DPF version in CI with a test that asserts a DPU still

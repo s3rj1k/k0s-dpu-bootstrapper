@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,11 +42,18 @@ const (
 	TokenExpiryAnnotation = "k0s.mirantis.com/token-expires-at"
 	// TokenIDAnnotation records the token id, which names the Secret in the DPU cluster.
 	TokenIDAnnotation = "k0s.mirantis.com/token-id"
+	// InputHashAnnotation fingerprints the script as rendered with a stand in token, so a
+	// change to anything the template puts in it is visible.
+	InputHashAnnotation = "k0s.mirantis.com/input-hash"
+	// ScriptHashAnnotation fingerprints the script that was stored, so an edit made to the
+	// Secret by anyone else is visible.
+	ScriptHashAnnotation = "k0s.mirantis.com/script-hash"
 
 	reasonRendered           = "JoinScriptRendered"
 	reasonTemplateAmbiguous  = "JoinScriptTemplateAmbiguous"
 	reasonTemplateUnresolved = "JoinScriptTemplateUnresolved"
 	reasonRenderFailed       = "JoinScriptRenderFailed"
+	reasonScriptInvalid      = "JoinScriptInvalid"
 	reasonMintFailed         = "JoinTokenMintFailed"
 )
 
@@ -68,9 +76,12 @@ func (r *DPUReconciler) Now() time.Time {
 	return time.Now()
 }
 
-// RecordFailure reports a failure on the DPU and returns the error unchanged.
-func (r *DPUReconciler) RecordFailure(obj *unstructured.Unstructured, reason string, err error) error {
-	r.Recorder.Event(obj, corev1.EventTypeWarning, reason, err.Error())
+// RecordFailure reports a failure on every object it concerns, always the DPU and for a bad
+// template its ConfigMap too, and returns the error unchanged.
+func (r *DPUReconciler) RecordFailure(reason string, err error, objects ...client.Object) error {
+	for _, obj := range objects {
+		r.Recorder.Event(obj, corev1.EventTypeWarning, reason, err.Error())
+	}
 
 	return err
 }
@@ -98,10 +109,16 @@ func (r *DPUReconciler) WriteSecret(
 	key types.NamespacedName,
 	tmpl *joinscript.Template,
 	token *k0stoken.Token,
-	script string,
-) error {
+	script, inputHash string,
+) (string, error) {
+	var superseded string
+
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		// Read before it is overwritten, since this is the only record of the token the DPU
+		// was previously offered.
+		superseded = secret.Annotations[TokenIDAnnotation]
+
 		if secret.Annotations == nil {
 			secret.Annotations = map[string]string{}
 		}
@@ -109,6 +126,8 @@ func (r *DPUReconciler) WriteSecret(
 		secret.Annotations[TemplateAnnotation] = tmpl.Ref()
 		secret.Annotations[TokenExpiryAnnotation] = token.ExpiresAt.Format(time.RFC3339)
 		secret.Annotations[TokenIDAnnotation] = token.ID
+		secret.Annotations[InputHashAnnotation] = inputHash
+		secret.Annotations[ScriptHashAnnotation] = joinscript.Hash(script)
 
 		ownerRef := dpf.OwnerReference(dpuObj)
 		secret.OwnerReferences = UpsertOwnerReference(secret.OwnerReferences, &ownerRef)
@@ -120,20 +139,28 @@ func (r *DPUReconciler) WriteSecret(
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("writing join secret %s: %w", key, err)
+		return "", fmt.Errorf("writing join secret %s: %w", key, err)
 	}
-	return nil
+
+	return superseded, nil
 }
 
 // UpToDate reports whether a Secret still carries a usable script, and for how long.
-func (r *DPUReconciler) UpToDate(secret *corev1.Secret, tmpl *joinscript.Template) (time.Duration, bool) {
+func (r *DPUReconciler) UpToDate(
+	secret *corev1.Secret, tmpl *joinscript.Template, inputHash string,
+) (time.Duration, bool) {
 	if secret.Annotations[ManagedByAnnotation] != ManagedByValue {
 		return 0, false
 	}
-	if secret.Annotations[TemplateAnnotation] != tmpl.Ref() {
+
+	// Everything the script says, other than the token, reduced to one string. A Secret
+	// from a build that wrote no hash has none of this and is rewritten.
+	if secret.Annotations[InputHashAnnotation] != inputHash {
 		return 0, false
 	}
-	if len(secret.Data[dpf.JoinSecretKey]) == 0 {
+	// What the Secret holds, rather than what it was built from. Anything written by anyone
+	// else, emptied, or left by a build that stamped no hash, is not ours and is replaced.
+	if secret.Annotations[ScriptHashAnnotation] != joinscript.Hash(string(secret.Data[dpf.JoinSecretKey])) {
 		return 0, false
 	}
 	expiresAt, err := time.Parse(time.RFC3339, secret.Annotations[TokenExpiryAnnotation])
@@ -149,13 +176,13 @@ func (r *DPUReconciler) UpToDate(secret *corev1.Secret, tmpl *joinscript.Templat
 
 // CurrentScript reports whether the join Secret holds a usable script, and for how long.
 func (r *DPUReconciler) CurrentScript(
-	ctx context.Context, key types.NamespacedName, tmpl *joinscript.Template,
+	ctx context.Context, key types.NamespacedName, tmpl *joinscript.Template, inputHash string,
 ) (time.Duration, bool, error) {
 	existing := &corev1.Secret{}
 
 	switch err := r.Get(ctx, key, existing); {
 	case err == nil:
-		renewIn, ok := r.UpToDate(existing, tmpl)
+		renewIn, ok := r.UpToDate(existing, tmpl, inputHash)
 
 		return renewIn, ok, nil
 	case apierrors.IsNotFound(err):
@@ -166,42 +193,121 @@ func (r *DPUReconciler) CurrentScript(
 	}
 }
 
-// RevokeToken drops a bootstrap token that was minted but never handed out, best effort.
-// A write that may have landed is never revoked, since the DPU could already hold it.
-func RevokeToken(ctx context.Context, c client.Client, token *k0stoken.Token) {
-	if err := k0stoken.Revoke(ctx, c, token.ID); err != nil {
-		ctrllog.FromContext(ctx).Error(err, "leaving behind a bootstrap token that was never handed out",
-			"tokenID", token.ID)
+// RevokeToken drops a bootstrap token that nothing will use, best effort. A token whose
+// write may have landed is never revoked, since the DPU could already be acting on it.
+func RevokeToken(ctx context.Context, c client.Client, tokenID string) {
+	if err := k0stoken.Revoke(ctx, c, tokenID); err != nil {
+		ctrllog.FromContext(ctx).Error(err, "leaving behind a bootstrap token nothing will use",
+			"tokenID", tokenID)
 	}
 }
 
-// RenderJoinSecret mints a token, renders the script and writes the Secret.
-func (r *DPUReconciler) RenderJoinSecret(
-	ctx context.Context,
-	dpuObj *unstructured.Unstructured,
-	dpu *dpf.DPU,
-	tmpl *joinscript.Template,
-	secretKey types.NamespacedName,
-) error {
+// RevokeForDeletedDPU takes back the join token of a DPU on its way out, best effort. The
+// Secret goes with the DPU, but the token it names lives in a cluster nothing here collects.
+func (r *DPUReconciler) RevokeForDeletedDPU(ctx context.Context, dpuObj *unstructured.Unstructured, dpu *dpf.DPU) {
+	log := ctrllog.FromContext(ctx)
+
+	if dpu.Spec.Cluster.IsZero() {
+		return
+	}
+
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Namespace: dpuObj.GetNamespace(), Name: dpf.JoinSecretName(dpuObj.GetName())}
+
+	if err := r.Get(ctx, key, secret); err != nil {
+		return
+	}
+
+	tokenID := secret.Annotations[TokenIDAnnotation]
+	if secret.Annotations[ManagedByAnnotation] != ManagedByValue || tokenID == "" {
+		return
+	}
+
 	clusterObj := dpf.NewDPUCluster()
 	if err := r.Get(ctx, dpu.Spec.Cluster.ObjectKey(), clusterObj); err != nil {
-		return fmt.Errorf("getting DPUCluster %s: %w", dpu.Spec.Cluster, err)
+		log.V(1).Info("leaving a token behind, the DPUCluster is already gone",
+			"tokenID", tokenID, "cluster", dpu.Spec.Cluster.String())
+
+		return
 	}
 
 	access, err := r.NewClusterAccess(ctx, r.Client, clusterObj)
 	if err != nil {
-		return r.RecordFailure(dpuObj, reasonMintFailed, err)
+		log.V(1).Info("leaving a token behind, the DPU cluster cannot be reached",
+			"tokenID", tokenID, "cluster", dpu.Spec.Cluster.String())
+
+		return
 	}
 
-	token, err := k0stoken.Mint(ctx, access.Client, access.APIServerURL, access.CACert, r.TokenTTL, r.Now())
+	RevokeToken(ctx, access.Client, tokenID)
+}
+
+const (
+	// ProbeTokenSize is how long the stand in token is. A real one runs to a few kilobytes,
+	// and a shorter stand in would let a script pass the size check and then outgrow it.
+	ProbeTokenSize = 4096
+	// ProbeExpiry stands in for the expiry of a token that does not exist yet. Fixed rather
+	// than the real deadline, or the same inputs would fingerprint differently every time.
+	ProbeExpiry = "1970-01-01T00:00:00Z"
+)
+
+// ProbeToken stands in for a real token while the script is checked. Base64 like the one it
+// replaces, so a script that parses with this parses with that.
+var ProbeToken = strings.Repeat("Y2hlY2tpbmcgdGhlIGpvaW4gc2NyaXB0", ProbeTokenSize/32)
+
+// Plan is everything a join Secret is built from, settled before a token exists for it.
+type Plan struct {
+	Access    *clusteraccess.Access
+	Data      joinscript.Data
+	InputHash string
+}
+
+// RenderScript renders the join script and rejects one that is not valid bash. Both are
+// reported on the DPU and on the template, since the template is what has to be edited.
+func (r *DPUReconciler) RenderScript(
+	dpuObj *unstructured.Unstructured, tmpl *joinscript.Template, data *joinscript.Data,
+) (string, error) {
+	script, err := joinscript.Render(tmpl, data)
 	if err != nil {
-		return r.RecordFailure(dpuObj, reasonMintFailed,
-			fmt.Errorf("minting join token for DPU %s/%s: %w", dpuObj.GetNamespace(), dpuObj.GetName(), err))
+		return "", r.RecordFailure(reasonRenderFailed, err, dpuObj, tmpl.ConfigMapRef())
 	}
 
-	script, err := joinscript.Render(tmpl, &joinscript.Data{
-		JoinToken:        token.Encoded,
-		TokenExpiresAt:   token.ExpiresAt.Format(time.RFC3339),
+	if tmpl.SkipValidation {
+		return script, nil
+	}
+
+	if err := joinscript.Validate(script, tmpl.Ref()); err != nil {
+		// The parser is stricter than bash in a few corners, so the way out is named here
+		// rather than left for the operator to find in the README.
+		return "", r.RecordFailure(reasonScriptInvalid,
+			fmt.Errorf("%w (annotate the template %s=true to store it unchecked)",
+				err, joinscript.SkipValidationAnnotation),
+			dpuObj, tmpl.ConfigMapRef())
+	}
+
+	return script, nil
+}
+
+// PlanJoinSecret settles what the script has to say and checks that it is valid bash, before
+// anything has been created for it. The token is the one input missing, and cannot matter.
+func (r *DPUReconciler) PlanJoinSecret(
+	ctx context.Context, dpuObj *unstructured.Unstructured, dpu *dpf.DPU, tmpl *joinscript.Template,
+) (*Plan, error) {
+	clusterObj := dpf.NewDPUCluster()
+	if err := r.Get(ctx, dpu.Spec.Cluster.ObjectKey(), clusterObj); err != nil {
+		return nil, fmt.Errorf("getting DPUCluster %s: %w", dpu.Spec.Cluster, err)
+	}
+
+	// Read every time, since the API server address lives here rather than in the template,
+	// and a control plane that moves changes nothing the template revision would show.
+	access, err := r.NewClusterAccess(ctx, r.Client, clusterObj)
+	if err != nil {
+		return nil, r.RecordFailure(reasonMintFailed, err, dpuObj)
+	}
+
+	plan := &Plan{Access: access, Data: joinscript.Data{
+		JoinToken:        ProbeToken,
+		TokenExpiresAt:   ProbeExpiry,
 		APIServerURL:     access.APIServerURL,
 		NodeName:         dpf.NodeName(dpuObj.GetName()),
 		DPUName:          dpuObj.GetName(),
@@ -209,17 +315,57 @@ func (r *DPUReconciler) RenderJoinSecret(
 		ClusterName:      dpu.Spec.Cluster.Name,
 		ClusterNamespace: dpu.Spec.Cluster.Namespace,
 		Values:           tmpl.Values,
-	})
-	if err != nil {
-		// The script the token was minted for was never written, and the render fails again
-		// on every retry, so leaving it behind would pile up live credentials.
-		RevokeToken(ctx, access.Client, token)
+	}}
 
-		return r.RecordFailure(dpuObj, reasonRenderFailed, err)
+	// A broken template fails the same way on every retry, so checking it here is what keeps
+	// a permanent failure from minting a credential every time it is retried.
+	probe, err := r.RenderScript(dpuObj, tmpl, &plan.Data)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := r.WriteSecret(ctx, dpuObj, secretKey, tmpl, token, script); err != nil {
+	plan.InputHash = joinscript.Hash(probe)
+
+	return plan, nil
+}
+
+// WriteJoinSecret mints a token, renders the script with it and stores the result.
+func (r *DPUReconciler) WriteJoinSecret(
+	ctx context.Context,
+	dpuObj *unstructured.Unstructured,
+	tmpl *joinscript.Template,
+	plan *Plan,
+	secretKey types.NamespacedName,
+) error {
+	access := plan.Access
+
+	token, err := k0stoken.Mint(ctx, access.Client, access.APIServerURL, access.CACert, r.TokenTTL, r.Now())
+	if err != nil {
+		return r.RecordFailure(reasonMintFailed,
+			fmt.Errorf("minting join token for DPU %s/%s: %w", dpuObj.GetNamespace(), dpuObj.GetName(), err), dpuObj)
+	}
+
+	plan.Data.JoinToken = token.Encoded
+	plan.Data.TokenExpiresAt = token.ExpiresAt.Format(time.RFC3339)
+
+	// The same template and the same values, differing only in a token Mint has already
+	// checked is base64, so reaching this is a bug rather than a template someone wrote.
+	script, err := r.RenderScript(dpuObj, tmpl, &plan.Data)
+	if err != nil {
+		RevokeToken(ctx, access.Client, token.ID)
+
 		return err
+	}
+
+	superseded, err := r.WriteSecret(ctx, dpuObj, secretKey, tmpl, token, script, plan.InputHash)
+	if err != nil {
+		return err
+	}
+
+	// Only once the replacement is the one on offer. A DPU that had read the old one retries
+	// the whole script every 30s, so it picks up the new token on its next pass.
+	if superseded != "" && superseded != token.ID {
+		RevokeToken(ctx, access.Client, superseded)
 	}
 
 	expiry := token.ExpiresAt.Format(time.RFC3339)
@@ -240,14 +386,17 @@ func (r *DPUReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, dpuObj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if dpuObj.GetDeletionTimestamp() != nil {
-		// The Secret is owned by the DPU and goes with it.
-		return ctrl.Result{}, nil
-	}
-
 	dpu, err := dpf.ProjectDPU(dpuObj)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if dpuObj.GetDeletionTimestamp() != nil {
+		// The Secret is owned by the DPU and goes with it. Its token is not owned by
+		// anything, and lives in another cluster.
+		r.RevokeForDeletedDPU(ctx, dpuObj, dpu)
+
+		return ctrl.Result{}, nil
 	}
 
 	// Once the kubelet is configured the agent never reads the Secret again.
@@ -272,7 +421,7 @@ func (r *DPUReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			reason = reasonTemplateAmbiguous
 		}
 
-		return ctrl.Result{}, r.RecordFailure(dpuObj, reason, err)
+		return ctrl.Result{}, r.RecordFailure(reason, err, dpuObj)
 	}
 	if tmpl == nil {
 		// Not a cluster this controller manages.
@@ -285,7 +434,14 @@ func (r *DPUReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		Name:      dpf.JoinSecretName(dpuObj.GetName()),
 	}
 
-	renewIn, current, err := r.CurrentScript(ctx, secretKey, tmpl)
+	// Worked out before the Secret is looked at, since what it should say is what decides
+	// whether what is there will do.
+	plan, err := r.PlanJoinSecret(ctx, dpuObj, dpu, tmpl)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	renewIn, current, err := r.CurrentScript(ctx, secretKey, tmpl, plan.InputHash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -295,7 +451,7 @@ func (r *DPUReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: renewIn}, nil
 	}
 
-	if err := r.RenderJoinSecret(ctx, dpuObj, dpu, tmpl, secretKey); err != nil {
+	if err := r.WriteJoinSecret(ctx, dpuObj, tmpl, plan, secretKey); err != nil {
 		return ctrl.Result{}, err
 	}
 
