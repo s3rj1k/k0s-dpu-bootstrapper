@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The DPUSet that produces the DPU objects this controller reacts to. Pairs with
+# examples/dpuflavor.yaml and a BFB.
+
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUSet
+metadata:
+  name: k0s-test
+  namespace: dpf-operator-system
+spec:
+  strategy:
+    type: RollingUpdate
+
+  # Narrow to one host while proving a new join script, then widen. On a fleet select the
+  # DPU label and exclude control plane nodes, whose DPUs should be in NIC mode.
+  dpuNodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: dpu-host-1
+
+  dpuTemplate:
+    spec:
+      dpuFlavor: k0s-test
+      bfb:
+        name: bf-bundle-3-4-0
+
+      # Hold parks the DPU before prepare BFB, after the DPU object exists and this
+      # controller has rendered the join Secret, so a script can be read before a flash.
+
+      # Release it by flipping the annotation on the DPUNodeMaintenance to false,
+      # provisioning.dpu.nvidia.com/wait-for-external-nodeeffect
+      nodeEffect:
+        hold: true
+
+      cluster:
+        # Applied by DPF with its own credentials, which is why the restricted
+        # node-role.kubernetes.io prefix is allowed. A kubelet cannot self assign it, so
+        # k0s worker labels is the wrong place for a role label.
+        nodeLabels:
+          # Cosmetic, shows in the ROLES column.
+          node-role.kubernetes.io/dpu: ""
+          # Repels the dpu-detector, whose hardcoded affinity only tests control-plane and
+          # master. Drop this if the detector is disabled. Audit what else selects on it.
+          node-role.kubernetes.io/master: ""

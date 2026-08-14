@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The DPUCluster the join script template is scoped to, matching the annotations on
+# examples/join-script.yaml.
+
+# The static cluster manager adopts an existing control plane rather than building one, so
+# the kubeconfig is supplied by you. Enable it with staticClusterManager in
+# DPFOperatorConfig, and disable kamajiClusterManager, only one implementation may run.
+
+# Build the Secret from a kubeconfig whose server is reachable from inside a Pod. A
+# workstation kubeconfig usually points at 127.0.0.1 through a tunnel, which resolves to
+# the Pod itself and fails.
+#
+#   umask 077
+#   kubectl config view --raw --minify -o json \
+#     | jq '.clusters[0].cluster.server="https://<api-ip>:6443"
+#           | del(.clusters[0].cluster."tls-server-name")' > /tmp/super-admin.conf
+#   kubectl create secret generic dpu-cluster-1-admin-kubeconfig -n dpf-operator-system \
+#     --from-file=super-admin.conf=/tmp/super-admin.conf
+#   shred -u /tmp/super-admin.conf
+#
+# The key must be named super-admin.conf.
+
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUCluster
+metadata:
+  name: dpu-cluster-1
+  namespace: dpf-operator-system
+spec:
+  # Static adopts an existing control plane. Kamaji would create one instead.
+  type: static
+  maxNodes: 1000
+  # Name of the Secret above, in this namespace.
+  kubeconfig: dpu-cluster-1-admin-kubeconfig

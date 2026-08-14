@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The DPF side of the install, trimmed to what a k0s join needs.
+
+# staticClusterManager ships disabled and must be turned on. kamajiClusterManager ships
+# enabled and must be turned off, only one DPUCluster implementation may run in a cluster.
+
+# Dropping dpuServiceController is what removes the argo-cd dependency. Nothing in
+# provisioning references DPUService, the dpu-agent arrives as a deb installed by the host
+# agent, and the cluster config phase only waits for the Node and applies node labels.
+
+apiVersion: operator.dpu.nvidia.com/v1alpha1
+kind: DPFOperatorConfig
+metadata:
+  name: dpfoperatorconfig
+  namespace: dpf-operator-system
+spec:
+  provisioningController:
+    dmsTimeout: 900
+    # Leave bfbPVCName unset only on a single node. Elsewhere point it at a ReadWriteMany
+    # PVC or the BFB cache is stranded when the controller reschedules.
+
+  # Adopts the existing k0s control plane named by examples/dpucluster.yaml.
+  staticClusterManager: {}
+
+  kamajiClusterManager:
+    disable: true
+
+  # The DPU brings its own networking, so none of the DPUService backed components are
+  # wanted here. Each of these would otherwise be delivered through argo-cd.
+  dpuServiceController:
+    disable: true
+  serviceSetController:
+    disable: true
+  sfcController:
+    disable: true
+  cniInstaller:
+    disable: true
+  multus:
+    disable: true
+  flannel:
+    disable: true
+  ovsCNI:
+    disable: true
+  nvipam:
+    disable: true
+  sriovDevicePlugin:
+    disable: true
+
+  # Covers kube-state-metrics, node-problem-detector and the otel collector.
+  monitoring:
+    disable: true
+
+  # dpuDetector is left at its default, enabled. Its only output is NFD feature labels
+  # that nothing in DPF reads, and its hardcoded affinity puts it on DPU nodes once they
+  # join, where it rewrites DPUDevice status with the DPU's own PCI numbering and breaks
+  # the next provision. Keep it away with node-role.kubernetes.io/master in
+  # examples/dpuset.yaml, or set disable true if nothing consumes its labels.

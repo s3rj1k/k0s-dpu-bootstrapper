@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k0s-join-script
+  namespace: dpf-operator-system
+  labels:
+    # Only ConfigMaps carrying this label are considered.
+    k0s.mirantis.com/dpu-join-script: "true"
+  annotations:
+    # Exactly one template may serve a given DPU. Annotations rather than labels, because
+    # label values are too short for some cluster names.
+    k0s.mirantis.com/dpu-cluster-name: dpu-cluster-1
+    k0s.mirantis.com/dpu-cluster-namespace: dpf-operator-system
+data:
+  # Exported by the skeleton.
+
+  # k0s v1.36.3 for arm64, matching the control plane. A mirror works too.
+  k0sURL: https://github.com/k0sproject/k0s/releases/download/v1.36.3%2Bk0s.2/k0s-v1.36.3%2Bk0s.2-arm64
+  criSocket: remote:unix:///run/containerd/containerd.sock
+  # The profile the control plane publishes.
+  k0sProfile: numa
+  # Keeps kubelet state in one place on the node.
+  kubeletRootDir: /var/lib/kubelet
+  extraArgs: --labels dpu=true
+  # Steps are replaced one at a time. Values are substituted verbatim, so a step reads
+  # the skeleton's shell variables and starts at column zero.
+
+  # Neutralised, not masked, so the agent step that starts the kubelet still works.
+  stepNeutraliseKubelet: |-
+    install -d -m 0755 "$(dirname "$NEUTRALIZE_DROPIN")"
+    cat > "$NEUTRALIZE_DROPIN" <<'DROPIN'
+    [Service]
+    ExecStart=
+    ExecStart=/bin/sleep infinity
+    Restart=always
+    DROPIN
+    systemctl daemon-reload
+    systemctl stop kubelet 2>/dev/null || true
+  # The agent parses this file afterwards and fails without it. k0s writes no such file.
+  stepKubeletConfig: |-
+    install -d -m 0755 "$(dirname "$KUBELET_CONFIG")"
+    cat > "$KUBELET_CONFIG" <<'KUBELETCFG'
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    kind: KubeletConfiguration
+    KUBELETCFG
+  # A BFB never ships k0s. Leave the stock kubelet binary, the agent reads its version.
+  stepInstallK0s: |-
+    if [ ! -x "$K0S_BIN" ]; then
+      tmp="$(mktemp)"
+      curl -fsSL --retry 5 --retry-delay 5 -o "$tmp" "$K0S_URL"
+      install -m 0755 "$tmp" "$K0S_BIN"
+      rm -f "$tmp"
+    fi
+  # The token minted for this DPU.
+  stepWriteToken: |-
+    install -d -m 0700 "$(dirname "$TOKEN_FILE")"
+    ( umask 077; printf '%s' "$JOIN_TOKEN" > "$TOKEN_FILE" )
+  # Raised limits and out of memory protection. The unit need not exist yet.
+  stepWorkerService: |-
+    install -d -m 0755 /etc/systemd/system/k0sworker.service.d
+    cat > /etc/systemd/system/k0sworker.service.d/override.conf <<'OVERRIDE'
+    [Service]
+    LimitNOFILE=1048576
+    OOMScoreAdjust=-999
+    OVERRIDE
+    systemctl daemon-reload
+  # Reuses the agent's containerd and takes kubelet settings from the profile.
+  # The node name must match the DPU object, otherwise DPF never sees the node.
+  stepJoin: |-
+    if [ ! -e /etc/systemd/system/k0sworker.service ]; then
+      "$K0S_BIN" install worker \
+        --token-file "$TOKEN_FILE" \
+        --cri-socket "$CRI_SOCKET" \
+        --profile "$K0S_PROFILE" \
+        --kubelet-root-dir "$KUBELET_ROOT_DIR" \
+        --kubelet-extra-args="--hostname-override=$NODE_NAME" \
+        $EXTRA_ARGS
+      systemctl daemon-reload
+    fi
+    "$K0S_BIN" start || systemctl restart k0sworker
+  # Site hooks. Every key must exist even when empty.
+  preJoin: sysctl --write net.ipv4.ip_forward=1
+  # A worker has no admin credentials, so wait on the kubelet kubeconfig.
+
+  # Exiting 0 without it would have the agent report the DPU as joined, after which the
+  # token stops being refreshed for good.
+  postJoin: |-
+    for _ in $(seq 60); do
+      [ -f /var/lib/k0s/kubelet.conf ] && break
+      sleep 5
+    done
+    if [ ! -f /var/lib/k0s/kubelet.conf ]; then
+      echo "k0s worker did not obtain kubelet credentials" >&2
+      exit 1
+    fi
+  # Sets the facts and names the steps. Undoes the agent's kubelet work.
+  join.sh: |
+    #!/usr/bin/env bash
+
+    # Rendered for DPU {{ .DPUNamespace }}/{{ .DPUName }} and run by the DPU agent as bash.
+    # The agent retries the whole script every 30s, so every step has to be idempotent.
+    set -euo pipefail
+
+    JOIN_TOKEN='{{ .JoinToken }}'
+    TOKEN_EXPIRES_AT='{{ .TokenExpiresAt }}'
+    API_SERVER_URL='{{ .APIServerURL }}'
+    NODE_NAME='{{ .NodeName }}'
+    K0S_URL='{{ .Values.k0sURL }}'
+    CRI_SOCKET='{{ .Values.criSocket }}'
+    K0S_PROFILE='{{ .Values.k0sProfile }}'
+    KUBELET_ROOT_DIR='{{ .Values.kubeletRootDir }}'
+    EXTRA_ARGS='{{ .Values.extraArgs }}'
+
+    K0S_BIN=/usr/local/bin/k0s
+    TOKEN_FILE=/etc/k0s/join.token
+    KUBELET_CONFIG=/var/lib/kubelet/config.yaml
+    NEUTRALIZE_DROPIN=/etc/systemd/system/kubelet.service.d/20-k0s-neutralize.conf
+
+    {{ .Values.stepNeutraliseKubelet }}
+
+    {{ .Values.stepKubeletConfig }}
+
+    {{ .Values.stepInstallK0s }}
+
+    {{ .Values.preJoin }}
+
+    {{ .Values.stepWriteToken }}
+
+    {{ .Values.stepWorkerService }}
+
+    {{ .Values.stepJoin }}
+
+    {{ .Values.postJoin }}

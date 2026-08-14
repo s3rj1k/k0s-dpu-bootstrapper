@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Goes at /etc/k0s/containerd.d/nvidia.toml on hosts with GPUs. k0s merges anything in
+# that directory into its managed containerd config.
+
+# v3 schema, for containerd 2.x. SystemdCgroup false deliberately matches the kubelet
+# cgroupDriver cgroupfs. Disagreement there fails pods in ways that read as unrelated.
+
+version = 3
+
+[plugins]
+  [plugins.'io.containerd.cri.v1.runtime']
+    [plugins.'io.containerd.cri.v1.runtime'.containerd]
+      default_runtime_name = 'nvidia'
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes]
+        [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia]
+          runtime_type = 'io.containerd.runc.v2'
+          privileged_without_host_devices = false
+          sandboxer = 'podsandbox'
+          [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.nvidia.options]
+            BinaryName = '/usr/bin/nvidia-container-runtime'
+            SystemdCgroup = false

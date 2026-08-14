@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The control plane half of the join. The worker profile holds the kubelet settings.
+
+# Apply it to the k0s control plane, not to DPF. Addresses are site specific.
+
+# Mirrors a working single node deployment. The controller there was installed with
+# enable dynamic config, enable worker, no taints, profile numa and kubelet root dir
+# /var/lib/kubelet.
+
+apiVersion: k0s.k0sproject.io/v1beta1
+kind: ClusterConfig
+metadata:
+  name: k0s
+  namespace: kube-system
+spec:
+  api:
+    # The address the DPUs reach the control plane on, with the k0s API off its default
+    # port.
+    address: 10.0.0.1
+    k0sApiPort: 9443
+    sans:
+      - 169.254.1.42
+
+  telemetry:
+    enabled: false
+
+  storage:
+    type: etcd
+    etcd:
+      peerAddress: 10.0.0.1
+
+  network:
+    # Calico is the primary CNI. Disable the flannel component in DPFOperatorConfig.
+    provider: calico
+    dualStack:
+      enabled: false
+    calico:
+      mode: vxlan
+      mtu: 1400
+      overlay: Always
+      # Reaches for a public address, which an air gapped DPU cannot do.
+      ipAutodetectionMethod: can-reach=8.8.8.8
+      envVars:
+        FELIX_IGNORELOOSERPF: "true"
+        FELIX_ALLOWVXLANPACKETSFROMWORKLOADS: "true"
+
+  workerProfiles:
+    # The name the join script asks for through k0sProfile. k0s renders it into a worker
+    # config ConfigMap that k0s install worker resolves by name.
+    - name: numa
+      values:
+        # NUMA aware placement, giving guaranteed pods whole cores.
+        topologyManagerPolicy: "best-effort"
+        cpuManagerPolicy: "static"
+        cpuManagerPolicyOptions:
+          # Stable, and a no op without SMT siblings.
+          full-pcpus-only: "true"
+          # Beta and on by default since 1.23.
+          distribute-cpus-across-numa: "true"
+
+        # The static policy has to hold CPUs back for the system.
+        reservedSystemCPUs: "0"
+
+        # Read only by the static memory manager, which is off by default.
+        reservedMemory:
+          - limits:
+              memory: 2Gi
+            numaNode: 0
+
+        # Cleared because k0s reserves the system slice, which a reserved CPU set may not
+        # be combined with. The kubelet refuses to start otherwise.
+        kubeReservedCgroup: ""

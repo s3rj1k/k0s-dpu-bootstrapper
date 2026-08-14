@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The BlueField bundle DPF downloads and flashes. Referenced by examples/dpuset.yaml.
+
+# The provisioning controller fetches it once and serves it from bfb-registry. Without
+# bfbPVCName in DPFOperatorConfig it lands on host storage of whichever node runs that
+# controller, which is fine on a single node and stranded anywhere else.
+
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: BFB
+metadata:
+  name: bf-bundle-3-4-0
+  namespace: dpf-operator-system
+spec:
+  url: https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.4.0-92_26.04_ubuntu-24.04_64k_prod.bfb

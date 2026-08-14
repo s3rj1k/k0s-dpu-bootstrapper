@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The flavor used on the demo cluster, exactly as it ran. Derived from DPF's own
+# test/objects/infrastructure/dpuflavor.yaml, deviating only where the hardware forces it.
+
+# Start from that reference and edit. Retyping it loses lines that look optional and are
+# not, the br-comm-ch macaddress override above all.
+
+# Deviations from the reference, both because this BlueField is single port.
+# LINK_TYPE_P2 and the p1 port are dropped, and the br-hbn bridge is not used.
+
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUFlavor
+metadata:
+  name: k0s-test
+  namespace: dpf-operator-system
+spec:
+  bfcfgParameters:
+  - UPDATE_ATF_UEFI=yes
+  - UPDATE_DPU_OS=yes
+  - WITH_NIC_FW_UPDATE=no
+  - UPDATE_BMC_FW=no
+  - UPDATE_CEC_FW=no
+  configFiles:
+  - operation: override
+    path: /etc/mellanox/mlnx-bf.conf
+    permissions: '0644'
+    raw: 'ALLOW_SHARED_RQ="no"
+
+      IPSEC_FULL_OFFLOAD="no"
+
+      ENABLE_ESWITCH_MULTIPORT="yes"
+
+      '
+  - operation: override
+    path: /etc/mellanox/mlnx-ovs.conf
+    permissions: '0644'
+    raw: 'CREATE_OVS_BRIDGES="no"
+
+      OVS_DOCA="yes"
+
+      '
+  - operation: override
+    path: /etc/mellanox/mlnx-sf.conf
+    permissions: '0644'
+    raw: ''
+  - operation: override
+    path: /etc/systemd/system/dpu-agent.service.d/10-skip-reboot-method-discovery.conf
+    permissions: '0644'
+    raw: '[Service]
+
+      ExecStart=
+
+      ExecStart=/bin/bash -c ''/opt/dpf/dpuagent $(cat /opt/dpf/dpuagent.conf) --skip-reboot-method-discovery''
+
+      '
+  grub:
+    kernelParameters:
+    - console=hvc0
+    - console=ttyAMA0
+    - earlycon=pl011,0x13010000
+    - fixrttc
+    - net.ifnames=0
+    - biosdevname=0
+    - iommu.passthrough=1
+    - cgroup_no_v1=net_prio,net_cls
+    - hugepagesz=2048kB
+    - hugepages=250
+  nvconfig:
+  - device: '*'
+    parameters:
+    - PF_BAR2_ENABLE=0
+    - PER_PF_NUM_SF=1
+    - PF_TOTAL_SF=16
+    - PF_SF_BAR_SIZE=10
+    - INTERNAL_CPU_MODEL=1
+    - INTERNAL_CPU_OFFLOAD_ENGINE=0
+    - SRIOV_EN=1
+    - NUM_OF_VFS=8
+    - LAG_RESOURCE_ALLOCATION=1
+    - LINK_TYPE_P1=ETH
+  ovs:
+    rawConfigScript: "_ovs-vsctl() {\n  ovs-vsctl --timeout 15 \"$@\"\n}\n\n# Remove default OVS configuration on the DPU and ensure no leftovers on the OVS kernel side\n_ovs-vsctl --if-exists del-br ovsbr1\n\
+      _ovs-vsctl --if-exists del-br ovsbr2\novs-appctl --timeout 15 dpctl/del-dp system@ovs-system || true\n\n_ovs-vsctl set Open_vSwitch . other_config:doca-init=true\n_ovs-vsctl set Open_vSwitch . other_config:dpdk-max-memzones=50000\n\
+      _ovs-vsctl set Open_vSwitch . other_config:hw-offload=true\n_ovs-vsctl set Open_vSwitch . other_config:pmd-quiet-idle=true\n_ovs-vsctl set Open_vSwitch . other_config:max-idle=20000\n_ovs-vsctl set\
+      \ Open_vSwitch . other_config:max-revalidator=5000\n_ovs-vsctl set Open_vSwitch . other_config:doca-congestion-threshold=60\n_ovs-vsctl set Open_vSwitch . other_config:flow-limit=500000\n_ovs-vsctl\
+      \ set Open_vSwitch . other_config:hw-offload-ct-unidir-udp-enabled=true\n_ovs-vsctl remove Open_vSwitch . other_config default-datapath-type || true\n\nif systemctl list-unit-files openvswitch-switch.service\
+      \ &>/dev/null; then\n  systemctl restart openvswitch-switch\nelif systemctl list-unit-files openvswitch.service &>/dev/null; then\n  systemctl restart openvswitch\nfi\n_ovs-vsctl --may-exist add-br\
+      \ br-sfc\n_ovs-vsctl set bridge br-sfc datapath_type=netdev\n_ovs-vsctl set bridge br-sfc fail_mode=secure\n_ovs-vsctl --may-exist add-port br-sfc p0\n_ovs-vsctl set Interface p0 type=dpdk\n_ovs-vsctl\
+      \ set Interface p0 mtu_request=9216\n_ovs-vsctl set Port p0 external_ids:dpf-type=physical\necho -e \"CHANGE-ME\\nCHANGE-ME\" | passwd ubuntu\n\n# WA for linux-cloud: override dpf-comm-ch netplan\n# set\
+      \ the oob_net0 mac on the bridge so it can get an IP\n# from DHCP of lab network.\n# NOTE: the use of $ {no_variable} is a hack to avoid substitution\n# of oob_mac by envsubst\n\noob_mac=$(cat /sys/class/net/oob_net0/address)\n\
+      cat <<EOF > /etc/netplan/99-dpf-comm-ch.yaml\nnetwork:\n    renderer: networkd\n    version: 2\n    ethernets:\n      pf0vf0:\n        mtu: 1500\n    bridges:\n      br-comm-ch:\n        macaddress:\
+      \ $oob_mac\n        dhcp4: yes\n        mtu: 1500\n        interfaces:\n          - pf0vf0\nEOF\n\n# The DPU uplink p0 has no cable here, so the br-comm-ch datapath through the\n# eswitch is dead.\
+      \ Two workarounds, both in a file the dpu agent does not manage\n# so they survive its netplan apply.\n# 1. oob_net0 carries the DPU management address. DPF disables it by default.\n# 2. br-comm-ch\
+      \ gets a static secondary alongside DHCP, so CheckBridge passes.\ncat <<'EOFWA' > /etc/netplan/99-zz-dpf-workaround.yaml\nnetwork:\n  renderer: networkd\n  version: 2\n  ethernets:\n    oob_net0:\n\
+      \      dhcp4: true\n      dhcp6: false\n      optional: true\n      nameservers:\n        addresses:\n          - 8.8.8.8\n          - 1.1.1.1\n  bridges:\n    br-comm-ch:\n      addresses:\n    \
+      \    - 198.51.100.2/30\nEOFWA\nchmod 0600 /etc/netplan/99-zz-dpf-workaround.yaml\nnetplan apply || true\n\n"
+  dpuMode: dpu

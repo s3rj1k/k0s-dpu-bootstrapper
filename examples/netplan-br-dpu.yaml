@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 k0s-dpu-bootstrapper authors
+# SPDX-License-Identifier: Apache-2.0
+
+# REQUIRED. Nothing provisions without this bridge. Goes at /etc/netplan/50-doca.yaml on
+# every host with a DPU, mode 0600. Interface names and addresses are site specific.
+
+# DPF blocks at Initialize Interface with DPUOOBBridgeNotConfigured until it exists. The
+# check is narrow, a link named br-dpu of type bridge with the default route leaving it.
+
+# Rename the bridge through DPFOperatorConfig spec.networking.dpuNodeOOBBridgeName.
+
+# Identify which netdev is the DPU before writing this, the host reading can mislead.
+#   lspci -nnd 15b3:                            a2dc is BlueField 3, 1021 is ConnectX 7
+#   ethtool -i <iface> | grep bus-info
+#   mlxconfig -d <pci> q | grep INTERNAL_CPU    present only on BlueField
+
+network:
+  version: 2
+  ethernets:
+    # Management uplink. Ideally not the DPU's own port, so that flashing the DPU cannot
+    # cut the host off the network.
+    mgmt0:
+      match:
+        macaddress: "00:00:5e:00:53:01"
+      set-name: "mgmt0"
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+
+    # The DPU PF0. Brought up so the link is live, never addressed and never bridged.
+    # DPF creates a VF of this port and attaches that to br-dpu itself. Enslaving the PF
+    # would put the management network into the DPU datapath.
+    dpu0:
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      optional: true
+
+  bridges:
+    # Required by DPF. The DPU never provisions while this is absent.
+    br-dpu:
+      interfaces: ["mgmt0"]
+      critical: true
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+
+      # Pinned so the DPU VF cannot win the lowest MAC election once DPF adds it, which
+      # would move the bridge MAC and break the switch side.
+      macaddress: "00:00:5e:00:53:01"
+
+      addresses:
+        - "192.0.2.10/24"
+      routes:
+        - to: "default"
+          via: "192.0.2.1"
+      nameservers:
+        addresses:
+          - 192.0.2.53
+
+      parameters:
+        # A single uplink bridge gains nothing from 30 seconds of listening on every boot.
+        stp: false
+        forward-delay: 0
