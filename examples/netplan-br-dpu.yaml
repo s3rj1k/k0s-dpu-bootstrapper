@@ -4,8 +4,9 @@
 # REQUIRED. Nothing provisions without this bridge. Goes at /etc/netplan/50-doca.yaml on
 # every host with a DPU, mode 0600. Interface names and addresses are site specific.
 
-# DPF blocks at Initialize Interface with DPUOOBBridgeNotConfigured until it exists. The
-# check is narrow, a link named br-dpu of type bridge with the default route leaving it.
+# Without it the DPU never leaves Initializing, with Initialized=False and the reason
+# DPUOOBBridgeNotConfigured. The check is narrow, a link named br-dpu of type bridge with
+# the default route leaving it.
 
 # Rename the bridge through DPFOperatorConfig spec.networking.dpuNodeOOBBridgeName.
 

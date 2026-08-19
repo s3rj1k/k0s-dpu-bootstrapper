@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -29,6 +30,9 @@ const (
 
 	// JoinSecretKey is the Secret key the DPU agent reads and executes with bash.
 	JoinSecretKey = "join"
+
+	// JoinSecretSuffix is what DPF appends to a DPU name to name its join Secret.
+	JoinSecretSuffix = "-kubeadm-join"
 
 	// KubeconfigSecretKey is the key DPF requires in a kubeconfig Secret.
 	KubeconfigSecretKey = "super-admin.conf"
@@ -186,7 +190,17 @@ func ProjectDPUCluster(u *unstructured.Unstructured) (*DPUCluster, error) {
 // JoinSecretName is the name DPF gives a DPU's join Secret, and the only name the agent
 // may read in zero trust mode.
 func JoinSecretName(dpuName string) string {
-	return dpuName + "-kubeadm-join"
+	return dpuName + JoinSecretSuffix
+}
+
+// DPUNameFromJoinSecret reverses JoinSecretName, reporting false for any other Secret.
+// A DPU cannot be named the empty string, so a Secret called just the suffix is not one.
+func DPUNameFromJoinSecret(secretName string) (string, bool) {
+	dpuName, ok := strings.CutSuffix(secretName, JoinSecretSuffix)
+	if !ok || dpuName == "" {
+		return "", false
+	}
+	return dpuName, true
 }
 
 // NodeName is the name the DPU registers under, which DPF takes from the DPU object.

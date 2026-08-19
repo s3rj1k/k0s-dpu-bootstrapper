@@ -91,8 +91,8 @@ Not needed: argo-cd, kamaji, local-path-provisioner, maintenance-operator.
 In order. Every file is in [`examples/`](examples/) and is commented.
 
 **1. Host networking.** [`netplan-br-dpu.yaml`](examples/netplan-br-dpu.yaml) to
-`/etc/netplan/` on every DPU host, mode 0600. Without `br-dpu` DPF stops at
-`Initialize Interface` with `DPUOOBBridgeNotConfigured`.
+`/etc/netplan/` on every DPU host, mode 0600. Without `br-dpu` the DPU never leaves
+`Initializing`, with `Initialized=False` and the reason `DPUOOBBridgeNotConfigured`.
 
 **2. k0s worker profile.** The `workerProfiles` block of
 [`k0s-cluster-config.yaml`](examples/k0s-cluster-config.yaml). Its profile name must equal
@@ -146,8 +146,11 @@ kubectl get secret <dpu>-kubeadm-join -n dpf-operator-system \
 # /input-hash, /script-hash. The template one is a record, not a freshness check
 ```
 
-Failures are Warning Events on the `DPU`, not on the Secret. A script that does not parse is
-reported on the template ConfigMap as well, since that is the object to edit.
+Failures that concern a template are Warning Events on the `DPU`, not on the Secret, and a
+script that does not parse is reported on the template ConfigMap as well, since that is the
+object to edit. Two failures only reach the controller log, a missing `DPUCluster` and a join
+Secret that cannot be read. An unusable kubeconfig Secret does get an Event, as
+`JoinTokenMintFailed`.
 
 ```sh
 kubectl describe dpu <dpu> -n dpf-operator-system
@@ -167,7 +170,7 @@ Expect the host to reboot during provisioning, `nodeRebootMethod` defaults to `h
 
 ## Join script template
 
-A ConfigMap in `--template-namespace`. The controller finds it by label and matches it to a
+A ConfigMap in `--namespace`. The controller finds it by label and matches it to a
 DPU by annotation. No match and the DPU is skipped. Two matches of equal specificity and the
 controller emits a Warning Event and writes nothing.
 
@@ -217,10 +220,12 @@ are watched.
 
 ### When a Secret is rewritten
 
-Two annotations decide, and both must match or the Secret is rewritten.
+Three annotations decide, and all must match or the Secret is rewritten. `managed-by` is
+checked first, which is what makes taking DPF's own Secret over safe.
 
 | | |
 |---|---|
+| `k0s.mirantis.com/managed-by` | that this controller wrote the Secret at all |
 | `k0s.mirantis.com/input-hash` | the script as rendered with a fixed stand in token |
 | `k0s.mirantis.com/script-hash` | the script that was actually stored |
 
@@ -241,13 +246,17 @@ not tracked and is picked up only when the token is next refreshed.
 
 The `DPUCluster` kubeconfig Secret is read on every reconcile to do this, which is the cost.
 
-**Forcing a rewrite.** Neither hash can be recomputed by hand, since one is of a script you
-never see and the other is of bytes you would have to hash exactly. Delete the annotation
-instead, and the next reconcile rebuilds the Secret.
+**Forcing a rewrite.** `input-hash` cannot be recomputed by hand, since it is of a script you
+never see. Delete an annotation instead, and the Secret is rebuilt on the next reconcile.
 
 ```sh
 kubectl annotate secret <dpu>-kubeadm-join -n dpf-operator-system k0s.mirantis.com/script-hash-
 ```
+
+Join Secrets are watched metadata only, so that edit is noticed at once and repaired. Editing
+the script or deleting the Secret outright works the same way. Only the contents are exempt,
+read live on demand and never cached, which is what the `list` and `watch` on Secrets in
+[`rbac.yaml`](deploy/rbac.yaml) is for.
 
 The script is **stored exactly as rendered**. Only the parse result is used, never the
 parser's own idea of how the script should look, because printing a parsed script back out
@@ -277,7 +286,7 @@ provisioning.
 
 | flag | default | |
 |---|---|---|
-| `--template-namespace` | `dpf-operator-system` | where join script ConfigMaps are read from |
+| `--namespace` | `dpf-operator-system` | the one namespace read and written. Cross namespace is not supported, so DPUs, DPUClusters, templates and join Secrets all live here |
 | `--token-ttl` | `4h` | validity of a minted bootstrap token |
 | `--token-refresh-before` | `1h` | mint again once a token has this much left. Must be shorter than `--token-ttl`, or the process exits at startup |
 | `--leader-elect` | `true` | only one replica mints tokens |
@@ -292,8 +301,11 @@ The controller-runtime `--zap-*` logging flags are also registered.
 
 | Symptom | Cause |
 |---|---|
-| DPU stuck at `Initialize Interface`, `DPUOOBBridgeNotConfigured` | no `br-dpu` on the host, step 1 |
+| DPU stuck in `Initializing`, `Initialized=False (DPUOOBBridgeNotConfigured)` | no `br-dpu` on the host, step 1 |
 | DPU stuck at `DPU Cluster Config`, `NodeNotFound` | the join script ran but no node registered. Read the rendered Secret |
+| DPU stuck at `DPU Cluster Config`, `NodeNotReady` | the node registered but never went Ready, usually a second primary CNI |
+| `JoinTokenMintFailed` Event | reaching the DPU cluster failed, not necessarily the mint. Check `spec.kubeconfig`, the `super-admin.conf` key, the embedded CA and the server address |
+| No Secret and no Events at all | the `DPUCluster` named by the DPU does not exist. That path only logs |
 | `JoinScriptInvalid` Event, and no Secret, DPF's own kubeadm one, or the last script this controller wrote | the rendered script is not valid bash. The Event names the line and column of the rendered script, or its size |
 | kubelet never starts on the DPU | `k0sProfile` names a worker profile that does not exist |
 | TLS `certificate is not yet valid` | the DPU clock is behind, usually no DNS so `ntpsec` cannot reach its pool |
@@ -347,7 +359,7 @@ DPF a runtime rather than a compile-time dependency.
 retained), because importing it pulls in `k8s.io/kubernetes` and ~31 replace directives.
 Diff it against upstream when upgrading k0s.
 
-**The only dependency this adds.** `mvdan.cc/sh/v3/syntax`, the parser behind `shfmt`, which
+**The only dependency the checking adds.** `mvdan.cc/sh/v3/syntax`, the parser behind `shfmt`, which
 pulls in no module but its own. It did move `golang.org/x/term`, which is linked into the
 binary, eleven minor versions forward. Only the parser is used, not the printer.
 

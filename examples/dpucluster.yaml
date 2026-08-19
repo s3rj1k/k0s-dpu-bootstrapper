@@ -13,7 +13,7 @@
 # the Pod itself and fails.
 #
 #   umask 077
-#   kubectl config view --raw --minify -o json \
+#   kubectl config view --raw --minify --flatten -o json \
 #     | jq '.clusters[0].cluster.server="https://<api-ip>:6443"
 #           | del(.clusters[0].cluster."tls-server-name")' > /tmp/super-admin.conf
 #   kubectl create secret generic dpu-cluster-1-admin-kubeconfig -n dpf-operator-system \

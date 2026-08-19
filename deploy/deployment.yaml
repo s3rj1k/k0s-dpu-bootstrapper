@@ -27,7 +27,7 @@ spec:
         - name: bootstrapper
           image: ghcr.io/s3rj1k/k0s-dpu-bootstrapper:dev
           args:
-            - --template-namespace=dpf-operator-system
+            - --namespace=dpf-operator-system
             - --token-ttl=4h
             - --token-refresh-before=1h
             - --leader-elect

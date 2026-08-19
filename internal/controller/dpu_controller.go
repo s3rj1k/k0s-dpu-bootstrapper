@@ -55,6 +55,7 @@ const (
 	reasonRenderFailed       = "JoinScriptRenderFailed"
 	reasonScriptInvalid      = "JoinScriptInvalid"
 	reasonMintFailed         = "JoinTokenMintFailed"
+	reasonClusterOutOfScope  = "JoinClusterOutOfScope"
 )
 
 // DPUReconciler writes a k0s join script into the Secret the DPU agent executes.
@@ -408,6 +409,17 @@ func (r *DPUReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		log.V(1).Info("DPU is not assigned to a DPUCluster yet")
 		return ctrl.Result{}, nil
 	}
+	// DPF's allocator may bind a DPU to a DPUCluster in any namespace. Nothing outside the
+	// one this controller watches is cached or granted, so say so rather than fail obscurely.
+	if dpu.Spec.Cluster.Namespace != r.TemplateNamespace {
+		err := fmt.Errorf("DPUCluster %s is outside namespace %s, which this controller does not read",
+			dpu.Spec.Cluster, r.TemplateNamespace)
+		// Recorded and dropped, because only a config change can bring that cluster into
+		// scope and a requeue would report the same thing forever.
+		_ = r.RecordFailure(reasonClusterOutOfScope, err, dpuObj)
+
+		return ctrl.Result{}, nil
+	}
 
 	tmpl, err := joinscript.Resolve(ctx, r.Client, r.TemplateNamespace, joinscript.Target{
 		Cluster: dpu.Spec.Cluster,
@@ -493,7 +505,23 @@ func (r *DPUReconciler) DPUsForDPUCluster(ctx context.Context, obj client.Object
 	return r.DPUsForCluster(ctx, dpf.ClusterRef{Name: obj.GetName(), Namespace: obj.GetNamespace()})
 }
 
-// SetupWithManager registers the controller. Secrets are neither cached nor watched.
+// DPUForJoinSecret maps a join Secret back to its DPU, so an edit or a delete is repaired
+// without waiting for the token refresh. The object is metadata only, so Data is not read.
+func (*DPUReconciler) DPUForJoinSecret(_ context.Context, obj client.Object) []reconcile.Request {
+	dpuName, ok := dpf.DPUNameFromJoinSecret(obj.GetName())
+	if !ok {
+		return nil
+	}
+	// A DPU whose Secret is already ours and current reconciles to a no op, so waking on
+	// our own writes costs one extra pass and cannot loop.
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: obj.GetNamespace(),
+		Name:      dpuName,
+	}}}
+}
+
+// SetupWithManager registers the controller. Secret names are watched, their contents are
+// read live and never cached.
 func (r *DPUReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	if r.NewClusterAccess == nil {
 		r.NewClusterAccess = clusteraccess.NewCache().Get
@@ -510,5 +538,8 @@ func (r *DPUReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) 
 		For(dpf.NewDPU()).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.DPUsForTemplate)).
 		Watches(dpf.NewDPUCluster(), handler.EnqueueRequestsFromMapFunc(r.DPUsForDPUCluster)).
+		// Metadata only, so the informer holds no Secret data. Structured reads stay live,
+		// because the manager client disables its cache for Secrets.
+		WatchesMetadata(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.DPUForJoinSecret)).
 		Complete(r)
 }

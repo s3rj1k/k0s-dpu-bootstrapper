@@ -7,10 +7,13 @@ metadata:
   name: k0s-dpu-bootstrapper
   namespace: dpf-operator-system
 ---
+# Cross namespace is not supported, so every grant below is scoped to the one namespace the
+# controller runs in and nothing here is cluster wide.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: k0s-dpu-bootstrapper
+  namespace: dpf-operator-system
 rules:
   # DPF provisioning objects are read, never written.
   - apiGroups:
@@ -22,8 +25,7 @@ rules:
       - get
       - list
       - watch
-  # Join script templates, and the DPUCluster kubeconfig Secrets used to reach a DPU
-  # cluster, plus the join Secret this controller renders.
+  # Join script templates, read by label from this one namespace.
   - apiGroups:
       - ""
     resources:
@@ -32,14 +34,16 @@ rules:
       - get
       - list
       - watch
-  # Secrets are read live and by name only, never listed or watched, so enumerating every
-  # Secret in the cluster is not granted.
+  # The controller reads Secret contents live and by name, and only consumes metadata from
+  # the informer. RBAC cannot say that, so list and watch do grant a namespace wide read.
   - apiGroups:
       - ""
     resources:
       - secrets
     verbs:
       - get
+      - list
+      - watch
       - create
       - update
       - patch
@@ -52,12 +56,13 @@ rules:
       - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: k0s-dpu-bootstrapper
+  namespace: dpf-operator-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: k0s-dpu-bootstrapper
 subjects:
   - kind: ServiceAccount

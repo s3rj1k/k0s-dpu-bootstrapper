@@ -52,8 +52,8 @@ spec:
   monitoring:
     disable: true
 
-  # dpuDetector is left at its default, enabled. Its only output is NFD feature labels
-  # that nothing in DPF reads, and its hardcoded affinity puts it on DPU nodes once they
-  # join, where it rewrites DPUDevice status with the DPU's own PCI numbering and breaks
-  # the next provision. Keep it away with node-role.kubernetes.io/master in
-  # examples/dpuset.yaml, or set disable true if nothing consumes its labels.
+  # dpuDetector is left at its default, enabled. It writes NFD feature files, and its
+  # hardcoded affinity puts it on DPU nodes once they join, where it reports the card's own
+  # PCI numbering. The host agent records that into DPUDevice status and the next provision
+  # fails on an address the real host does not have. Keep it away with
+  # node-role.kubernetes.io/master in examples/dpuset.yaml, or set disable true.

@@ -36,13 +36,13 @@ const (
 
 // Config holds the command line options of the controller.
 type Config struct {
-	zapOpts           zap.Options
-	probeAddr         string
-	templateNamespace string
-	tokenTTL          time.Duration
-	refreshBefore     time.Duration
-	leaderElection    bool
-	showVersion       bool
+	zapOpts        zap.Options
+	probeAddr      string
+	namespace      string
+	tokenTTL       time.Duration
+	refreshBefore  time.Duration
+	leaderElection bool
+	showVersion    bool
 }
 
 // BindFlags registers every option on the default flag set.
@@ -50,8 +50,9 @@ func BindFlags() *Config {
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.probeAddr, "health-probe-bind-address", ":8081", "Address the health probe endpoint binds to.")
-	flag.StringVar(&cfg.templateNamespace, "template-namespace", "dpf-operator-system",
-		"Namespace join script template ConfigMaps are read from.")
+	flag.StringVar(&cfg.namespace, "namespace", "dpf-operator-system",
+		"The one namespace this controller reads and writes. DPUs, DPUClusters, join script "+
+			"templates and join Secrets all live here, and nothing outside it is watched.")
 	flag.BoolVar(&cfg.leaderElection, "leader-elect", true, "Enable leader election, so only one replica mints tokens.")
 	flag.DurationVar(&cfg.tokenTTL, "token-ttl", defaultTokenTTL,
 		"Validity of a minted bootstrap token. It must cover BFB flashing and reboots, not the node's lifetime, "+
@@ -79,7 +80,7 @@ func Run(cfg *Config) error {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&cfg.zapOpts)))
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("starting k0s DPU bootstrapper", "version", version.VCS(version.AbbRevisionLen),
-		"templateNamespace", cfg.templateNamespace, "tokenTTL", cfg.tokenTTL.String())
+		"namespace", cfg.namespace, "tokenTTL", cfg.tokenTTL.String())
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -98,13 +99,15 @@ func Run(cfg *Config) error {
 		LeaderElection:         cfg.leaderElection,
 		LeaderElectionID:       "k0s-dpu-bootstrapper.k0s.mirantis.com",
 		Cache: cache.Options{
+			// Cross namespace is not supported, so every informer stops at this one and the
+			// RBAC needed is a Role rather than a ClusterRole.
+			DefaultNamespaces: map[string]cache.Config{cfg.namespace: {}},
 			ByObject: map[client.Object]cache.ByObject{
-				// Only join script templates are cached, and only in one namespace.
+				// Of the ConfigMaps in it, only join script templates are cached.
 				&corev1.ConfigMap{}: {
 					Label: labels.SelectorFromSet(labels.Set{
 						joinscript.TemplateLabel: joinscript.TemplateLabelValue,
 					}),
-					Namespaces: map[string]cache.Config{cfg.templateNamespace: {}},
 				},
 			},
 		},
@@ -112,7 +115,8 @@ func Run(cfg *Config) error {
 			Cache: &client.CacheOptions{
 				// DPU and DPUCluster are read through their informers.
 				Unstructured: true,
-				// Read live, since caching would hold every Secret in the cluster.
+				// Read live. Secrets are watched metadata only, and a structured cache
+				// alongside that would be a second copy of the same objects.
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
@@ -124,7 +128,7 @@ func Run(cfg *Config) error {
 	if err := (&controller.DPUReconciler{
 		Client:            mgr.GetClient(),
 		Recorder:          mgr.GetEventRecorderFor("k0s-dpu-bootstrapper"),
-		TemplateNamespace: cfg.templateNamespace,
+		TemplateNamespace: cfg.namespace,
 		TokenTTL:          cfg.tokenTTL,
 		RefreshBefore:     cfg.refreshBefore,
 	}).SetupWithManager(ctx, mgr); err != nil {

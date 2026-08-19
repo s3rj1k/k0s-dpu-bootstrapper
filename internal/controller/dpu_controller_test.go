@@ -183,6 +183,23 @@ func TestReconcileOverwritesDPFsOwnSecret(t *testing.T) {
 	}
 }
 
+func TestReconcileReportsClusterOutsideNamespace(t *testing.T) {
+	// DPF's allocator picks a DPUCluster from any namespace. Reaching one this controller
+	// does not watch used to surface as a cache error that retried forever.
+	elsewhere := dpf.ClusterRef{Name: "dpu-cluster-1", Namespace: "dpu-cplane-tenant1"}
+	r, hostClient, _ := tests.NewReconciler(t,
+		tests.DPU(tests.DPUName, elsewhere, false),
+		tests.JoinScript("k0s-join", elsewhere, testScript),
+	)
+
+	tests.Reconcile(t, r, tests.DPUName)
+
+	tests.ExpectEvents(t, r, "JoinClusterOutOfScope", tests.DPUName)
+	if _, err := tests.JoinSecret(t, hostClient, tests.DPUName); !apierrors.IsNotFound(err) {
+		t.Errorf("expected no join secret, got err = %v", err)
+	}
+}
+
 func TestReconcileSkipsUnmanagedCluster(t *testing.T) {
 	tmpl := tests.JoinScript("k0s-join", tests.ClusterOne, testScript)
 	tmpl.Annotations[joinscript.ClusterNameAnnotation] = "someone-elses"
@@ -412,6 +429,41 @@ func TestDPUsForDPUCluster(t *testing.T) {
 	for _, req := range got {
 		if req.Name == tests.DPUName {
 			t.Errorf("a DPU from another cluster was enqueued: %+v", got)
+		}
+	}
+}
+
+func TestDPUForJoinSecret(t *testing.T) {
+	r, _, _ := tests.NewReconciler(t,
+		tests.DPU(tests.DPUName, tests.ClusterOne, false), tests.DPUCluster(tests.ClusterOne),
+	)
+
+	secret := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Name:      dpf.JoinSecretName(tests.DPUName),
+		Namespace: tests.Namespace,
+	}}
+	got := r.DPUForJoinSecret(t.Context(), secret)
+	if len(got) != 1 || got[0].Name != tests.DPUName || got[0].Namespace != tests.Namespace {
+		t.Errorf("requests = %+v, want %s in %s", got, tests.DPUName, tests.Namespace)
+	}
+
+	// Every other Secret in the namespace reaches the same watch. The suffix has to be
+	// anchored at the end, so carrying it anywhere else must not enqueue anything.
+	for _, name := range []string{
+		"dpu-cluster-1-admin-kubeconfig",
+		"bootstrap-token-abcdef",
+		dpf.JoinSecretSuffix,
+		tests.DPUName,
+		dpf.JoinSecretName(tests.DPUName) + ".bak",
+		dpf.JoinSecretName(tests.DPUName) + "-old",
+		tests.DPUName + "-kubeadm-joined",
+	} {
+		other := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: tests.Namespace,
+		}}
+		if reqs := r.DPUForJoinSecret(t.Context(), other); len(reqs) != 0 {
+			t.Errorf("requests for Secret %q = %+v, want none", name, reqs)
 		}
 	}
 }
